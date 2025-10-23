@@ -32,6 +32,12 @@ s3_client = boto3.client(
 )
 
 
+def twilio_client():
+    if not (TWILIO_ACCOUNT_SID.startswith("AC") and len(TWILIO_AUTH_TOKEN) > 10):
+        raise RuntimeError("Twilio credentials not configured")
+    return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+
 def require_admin():
     token = request.headers.get("x-admin-token") or request.args.get("token")
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
@@ -182,6 +188,29 @@ def gather():
     return Response(str(vr), mimetype="text/xml")
 
 
+@app.route("/twilio/from-numbers", methods=["GET"])
+def twilio_from_numbers():
+    """
+    Returns numbers you own (capable of being 'from' numbers).
+    JSON: [{sid, phone_number, friendly_name, capabilities:{voice,sms,mms}}]
+    """
+    client = twilio_client()
+    items = []
+    for num in client.incoming_phone_numbers.list(limit=100):
+        caps = getattr(num, "capabilities", {}) or {}
+        items.append({
+            "sid": num.sid,
+            "phone_number": num.phone_number,
+            "friendly_name": num.friendly_name or "",
+            "capabilities": {
+                "voice": bool(caps.get("voice")),
+                "sms":   bool(caps.get("sms")),
+                "mms":   bool(caps.get("mms")),
+            }
+        })
+    return {"ok": True, "numbers": items}
+
+
 @app.route("/admin", methods=["GET"])
 def admin_page():
     require_admin()
@@ -292,7 +321,6 @@ def admin_page():
   background: #1f2937;
 }}
 
-
   @media (max-width:880px) {{ .grid2 {{ grid-template-columns: 1fr; }} }}
 </style>
 
@@ -304,7 +332,13 @@ def admin_page():
     <h2>Outbound Dialer</h2>
     <p class="muted">Enter a Twilio <b>From</b> number and one or more <b>To</b> numbers (E.164, one per line or comma-separated).</p>
     <label>From (Twilio number)</label>
-    <input id="from" placeholder="+16469749790" />
+
+<div class="row">
+  <select id="from-select"></select>
+  <button type="button" id="refresh-numbers">Refresh</button>
+</div>
+
+<input id="from" style="display:none" />
     <label>To numbers</label>
     <textarea id="to" placeholder="+4917671079494
 +16466681045"></textarea>
@@ -449,6 +483,62 @@ async function handleUpload(kind, inputId){{
     out.textContent = 'Error: ' + e.message;
   }}
 }}
+
+async function loadFromNumbers() {{
+  const sel = document.getElementById('from-select');
+  sel.innerHTML = '<option>Loading…</option>';
+  try {{
+    let r = await fetch('/twilio/from-numbers');
+    let data = await r.json();
+    let options = [];
+    if (r.ok && data.ok && data.numbers && data.numbers.length) {{
+      options = data.numbers.map(n => ({{
+        value: n.phone_number,
+        label: `${{n.phone_number}} ${{n.friendly_name ? '— ' + n.friendly_name : ''}}`
+      }}));
+    }} else {{
+      r = await fetch('/twilio/caller-ids');
+      data = await r.json();
+      if (r.ok && data.ok && data.caller_ids && data.caller_ids.length) {{
+        options = data.caller_ids.map(n => ({{
+          value: n.phone_number,
+          label: `${{n.phone_number}} ${{n.friendly_name ? '— ' + n.friendly_name : ''}}`
+        }}));
+      }}
+    }}
+    if (!options.length) {{
+      sel.innerHTML = '<option>No numbers found</option>';
+      return;
+    }}
+    sel.innerHTML = options.map(o => `<option value="${{o.value}}">${{o.label}}</option>`).join('');
+  }} catch(e) {{
+    sel.innerHTML = '<option>Error loading numbers</option>';
+  }}
+}}
+
+async function callDialer() {{
+  const from = document.getElementById('from-select').value || '';
+  const toRaw = document.getElementById('to').value.trim();
+  const out = document.getElementById('dial-out');
+  out.textContent = 'Creating calls…';
+  try {{
+    const r = await fetch('/dial', {{
+      method:'POST',
+      headers: {{ 'Content-Type':'application/json' }},
+      body: JSON.stringify({{ from, to: toRaw }})
+    }});
+    const data = await r.json().catch(async () => ({{ ok:false, error: await r.text() }}));
+    out.textContent = JSON.stringify(data, null, 2);
+  }} catch(e) {{
+    out.textContent = 'Error: ' + e.message;
+  }}
+}}
+
+document.getElementById('btn-dial').addEventListener('click', callDialer);
+document.getElementById('refresh-numbers').addEventListener('click', loadFromNumbers);
+window.addEventListener('load', loadFromNumbers);
+
+
 </script>
 """
 
