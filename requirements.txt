@@ -4,3 +4,4 @@ requests==2.32.3
 pytz==2024.1
 waitress==2.1.2
 twilio==9.2.3
+boto3==1.35.15
